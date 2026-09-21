@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+**A skill suggestion is now a skill this session can actually open**
+
+- The plugin derived its skill roots from `HERMES_HOME`, and under a named profile that
+  home can still be the default one. Jev therefore ranked the **default profile's** catalog
+  and named three skills the running profile could not load at all —
+  `product-runtime-feature-audits`, `delegated-work-followthrough` and
+  `macos-third-party-software-installation`. Each one sent the agent to a `skill_view` that
+  answered "not found". All three exist on disk, which is why nothing caught it.
+- Roots now come from Hermes itself (`agent.skill_utils.get_all_skills_dirs`), so the
+  ranking is scoped to the profile in flight; the old derivation stays as the fallback when
+  Hermes cannot be asked.
+- Every pick is then verified with the loader behind the `skill_view` tool before anything
+  is attached to the turn, and the name offered is the one the loader answers to. A name
+  Hermes cannot open is dropped silently and logged as `skill_unreachable` in the decision
+  log. Unverifiable (an older Hermes with no `tools.skills_tool`) means silent too: a
+  suggestion is never worth a call that fails.
+- 8 new offline tests in `tests/test_skill_suggestion_reachable.py`; `skills/jev-skill-select/SKILL.md`
+  now states the guarantee.
+
 ## 0.19.0 (2026-09-21)
 
 A search run as a loop, with Jev taking the three decisions and nothing else.

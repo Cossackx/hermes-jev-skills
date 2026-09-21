@@ -16,7 +16,9 @@ Acknowledgements never leave the machine. "ok", "thanks, that worked", "got it",
 
 ## On Hermes
 
-`/jev skills on` makes the `hermes-jev` plugin do this once per fresh turn. When a skill clearly fits, a one-line suggestion is attached to the turn naming it; load it with `skill_view` unless it plainly does not apply. It reads the folders Hermes itself reads for the profile, which are the profile's skills folder and then every `skills.external_dirs` folder, and it respects `skills.disabled`. Project-local skill folders are not read.
+`/jev skills on` makes the `hermes-jev` plugin do this once per fresh turn. When a skill clearly fits, a one-line suggestion is attached to the turn naming it; load it with `skill_view` unless it plainly does not apply. It asks Hermes which folders this session actually loads — the profile's skills folder and every `skills.external_dirs` folder — and it respects `skills.disabled`. Project-local skill folders are not read.
+
+The suggestion is then checked against Hermes's own loader before it is made: a name that `skill_view` cannot open in this session is never offered, and the name offered is the one the loader answers to. So you will not be sent to a procedure you do not have — which matters on a profile whose catalog is smaller than the one Jev was ranking, and on a machine where a skill was never installed. Unverifiable means silent, because a suggestion is never worth a call that fails.
 
 ## Asking directly (any agent)
 
