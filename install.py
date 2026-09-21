@@ -15,6 +15,8 @@ import json
 import os
 import re
 import shutil
+import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,6 +25,7 @@ from typing import Dict, List
 REPO = Path(__file__).resolve().parent
 PLUGIN = "hermes-jev"
 SKILLS = sorted(p.name for p in (REPO / "skills").iterdir() if (p / "SKILL.md").is_file())
+OBSERVER_JEVKIT = ("__init__.py", "client.py", "keystore.py", "privacy.py", "skillpick.py")
 
 
 def _copytree(src: Path, dst: Path) -> None:
@@ -33,20 +36,62 @@ def _copytree(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
 
 
+def _copy_observer_jevkit(dst: Path) -> None:
+    """Install only the modules needed by the bounded skill observer."""
+    if dst.is_symlink() or dst.is_file():
+        dst.unlink()
+    elif dst.is_dir():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    for name in OBSERVER_JEVKIT:
+        shutil.copy2(REPO / "jevkit" / name, dst / name)
+
+
 def _link(target: Path, link: Path) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
-    if link.is_symlink() or link.is_file():
-        link.unlink()
-    elif link.is_dir():
-        shutil.rmtree(link)
-    link.symlink_to(target)
+    _remove(link)
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+        return
+    except OSError:
+        if os.name != "nt":
+            raise
+    if target.is_dir():
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode:
+            raise OSError(result.stderr.strip() or result.stdout.strip() or "failed to create directory junction")
+    else:
+        try:
+            os.link(target, link)
+        except OSError:
+            shutil.copy2(target, link)
 
 
 def _remove(path: Path) -> bool:
-    if path.is_symlink() or path.is_file():
+    if path.is_symlink():
         path.unlink()
         return True
-    if path.is_dir():
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if os.name == "nt" and reparse and attributes & reparse:
+        try:
+            path.rmdir()
+        except NotADirectoryError:
+            path.unlink()
+        return True
+    if stat.S_ISREG(info.st_mode):
+        path.unlink()
+        return True
+    if stat.S_ISDIR(info.st_mode):
         shutil.rmtree(path)
         return True
     return False
@@ -80,15 +125,23 @@ def enable_plugin(config: Path, enable: bool) -> str:
         end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i].startswith((" ", "#"))), len(lines))
         block = lines[start + 1:end]
         item = re.compile(rf"^\s*-\s*['\"]?{re.escape(PLUGIN)}['\"]?\s*$")
+        key = next((i for i, line in enumerate(block)
+                    if re.match(r"^  enabled:\s*(?:\[[^\]]*\])?\s*(?:#.*)?$", line)), None)
+        if key is not None:
+            inline = re.match(r"^  enabled:\s*\[([^\]]*)\]\s*(#.*)?$", block[key])
+            if inline:
+                items = [item.strip() for item in re.findall(
+                    r'"[^"]*"|\'[^\']*\'|[^,]+', inline.group(1)) if item.strip()]
+                comment = f" {inline.group(2)}" if inline.group(2) else ""
+                block[key] = f"  enabled:{comment}"
+                block[key + 1:key + 1] = [f"  - {item}" for item in items]
         present = [i for i, line in enumerate(block) if item.match(line)]
-        key = next((i for i, line in enumerate(block) if re.match(r"^  enabled:\s*(\[\s*\])?\s*$", line)), None)
         if enable:
             if present:
                 return "already enabled"
             if key is None:
                 block.insert(0, "  enabled:")
                 key = 0
-            block[key] = "  enabled:"          # turns `enabled: []` into a block list
             block.insert(key + 1, f"  - {PLUGIN}")
         else:
             if not present:
@@ -118,7 +171,7 @@ def install_hermes(root: Path, enable: str, check: bool) -> Dict[str, object]:
         report["would_enable_in"] = sorted(wanted)
         return report
     _copytree(REPO / "hermes" / "plugin" / PLUGIN, plugin_dir)
-    _copytree(REPO / "jevkit", plugin_dir / "jevkit")
+    _copy_observer_jevkit(plugin_dir / "jevkit")
     skills_dir = root / "skills" / "jev"
     skills_dir.mkdir(parents=True, exist_ok=True)
     for name in SKILLS:
@@ -188,9 +241,11 @@ def main() -> int:
         if (hermes / "config.yaml").is_file():
             report["hermes"] = install_hermes(hermes, args.enable, args.check)
         report["skill_folders"] = [install_skills(f, args.check) for f in folders]
-        report["next"] = ["jev doctor", "jev setup-key   (only if the key is missing; the person pastes it in a private page)",
-                          "jev models suggest --write   (only if no routing pools exist yet)",
-                          "Hermes: restart the gateway when convenient, then /jev routing shadow"]
+        report["next"] = [
+            "jev doctor",
+            "jev setup-key   (only if the key is missing; the person pastes it in a private page)",
+            "Hermes: start a fresh session, then /jev skills shadow",
+        ]
     print(json.dumps(report, indent=2))
     return 0
 

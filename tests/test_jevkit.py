@@ -131,7 +131,8 @@ class KeystoreTests(unittest.TestCase):
             env.write_text("# comment\nOTHER=1\nTYPESAFE_API_KEY=old\nLAST=2\n")
             keystore.upsert_env_file(env, KEY)
             self.assertEqual(env.read_text(), f"# comment\nOTHER=1\nTYPESAFE_API_KEY={KEY}\nLAST=2\n")
-            self.assertEqual(oct(env.stat().st_mode & 0o777), "0o600")
+            if os.name != "nt":
+                self.assertEqual(oct(env.stat().st_mode & 0o777), "0o600")
 
     def test_store_writes_every_hermes_lane_and_never_returns_the_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -370,6 +371,34 @@ class SkillPickTests(unittest.TestCase):
                     return {"type": "choice", "choice": "none", "confidence": 0.9, "probabilities": {"none": 0.99}}
                 return {"type": "noul", "noul": 0.0}
             self.assertEqual(skillpick.pick("thanks!", skills, transport=fake(wants_none))["skills"], [])
+
+    def test_lexical_shortlist_recovers_exact_codex_skill_when_stage_one_misses(self):
+        skills = [
+            {"name": "audit-only", "description": "Conduct a read-only audit", "path": "audit"},
+            {"name": "maps", "description": "Geocoding and routes", "path": "maps"},
+            {"name": "codex", "description": "Operate the OpenAI Codex coding agent", "path": "codex"},
+            {"name": "personal-investment-analysis", "description": "Analyze portfolios", "path": "invest"},
+        ]
+
+        def misses_then_verifies(name, question, state):
+            if question["type"] == "choice":
+                return {
+                    "type": "choice",
+                    "choice": "none",
+                    "confidence": 0.99,
+                    "probabilities": {key: (0.99 if key == "none" else 0.0) for key in question["criteria"]},
+                }
+            if name == "needs_skill":
+                return {"type": "noul", "noul": 0.95}
+            skill_text = state["skills"].get(f"S{name[1:]}", "")
+            return {"type": "noul", "noul": 0.45 if skill_text.startswith("codex:") else 0.05}
+
+        transport = fake(misses_then_verifies)
+        result = skillpick.pick("fix cmc agent codex login", skills, transport=transport)
+
+        self.assertEqual([item["name"] for item in result["skills"]], ["codex"])
+        self.assertEqual(len(transport.calls), 2)
+        self.assertIn("codex:", " ".join(transport.calls[1]["request"]["state"]["skills"].values()))
 
 
 def action_request(**overrides):

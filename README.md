@@ -2,6 +2,12 @@
 
 Give your agent a fast, cheap second brain for the small decisions.
 
+> **Bounded fork branch.** `hardening/skill-shadow-0.3.3` deliberately exposes
+> only skill selection to Hermes. Model routing, memory filtering, compaction,
+> and action selection remain unregistered. Start in `skills: shadow`; advisory
+> mode may attach at most two candidates and never chooses a model, tool, action,
+> or final answer.
+
 [Jev](https://docs.typesafe.ai) is TypeSafe's decision model. It does not write text. You hand it a state and typed questions (pick one, score this, yes or no) and it answers in about 0.4 seconds for a tiny fraction of a cent, with a calibrated confidence. This repo puts that to work on the decisions an agent makes all day, so your expensive model only does the thinking and writing.
 
 | Skill | What Jev decides | Measured |
@@ -19,14 +25,16 @@ Built for [Hermes](https://github.com/NousResearch/hermes-agent). The skills and
 
 ## Install
 
-**Point your agent at this repo** and say: *"Install Hermes Jev Skills from https://github.com/kerpopule/hermes-jev-skills"*. It will follow [AGENTS.md](AGENTS.md).
+**Point your agent at this branch** and say: *"Install the bounded skill observer
+from https://github.com/Cossackx/hermes-jev-skills/tree/hardening/skill-shadow-0.3.3"*.
+It will follow [AGENTS.md](AGENTS.md).
 
 **Got it as a zip?** Unzip it anywhere, then run the second and third commands below from that folder.
 
 Or by hand (Python 3.9+, no dependencies):
 
 ```bash
-git clone https://github.com/kerpopule/hermes-jev-skills ~/hermes-jev-skills
+git clone --branch hardening/skill-shadow-0.3.3 https://github.com/Cossackx/hermes-jev-skills ~/hermes-jev-skills
 ```
 
 ```bash
@@ -49,20 +57,18 @@ The page lives on an unguessable one-time URL, refuses requests with a foreign `
 
 ## On Hermes
 
-The `hermes-jev` plugin uses only public plugin seams (`pre_llm_call`, `llm_request` middleware, tools, a slash command), so `hermes update` does not break it and nothing in Hermes core is patched.
+The bounded `hermes-jev` plugin uses one public hook (`pre_llm_call`) and one
+slash command. Nothing in Hermes core is patched.
 
 ```
 /jev                         status
-/jev routing shadow          decide and log, do not switch (start here)
-/jev routing on              switch models per turn
-/jev skills on               suggest the right skill per turn
-/jev notice on               show "[Jev] hard · coding → kimi-k3 · confidence 0.92" on routed replies
-/jev routing on all          make it the default for every profile (a profile's own setting still wins)
+/jev skills shadow           evaluate and log; inject nothing (start here)
+/jev skills on               attach up to two advisory candidates
+/jev skills off              disable the observer
 ```
 
-Tools the agent gets: `jev_memory_filter`, `jev_compact_select`, `jev_choose_action`.
-
-A plugin can swap the model, not the provider connection. On OpenRouter that still covers every vendor. If you run `/model` yourself, your choice wins.
+The plugin registers no tools or middleware. It cannot swap models, filter
+memory, compact a transcript, choose an action, or alter an answer.
 
 ### Every model you have
 
@@ -81,7 +87,9 @@ Jev is a cloud API, so this is spelled out:
 - **Routing**: the user's turn, redacted (emails, phones, tokens, long hex masked), capped at 3,000 characters. Never history, tool results, files or memory. Turns that look like they hold a secret, and any profile you list in `private_profiles`, send only coarse features: length, whether code is present, whether risk words appear.
 - **Memory**: the query and up to 900 characters per passage, redacted. Your store's ids, paths and sources are replaced with `P0`, `P1`… and never sent. A passage that looks like a credential is not sent at all.
 - **Compaction**: up to 700 characters per turn, redacted. Turns that look sensitive are skipped.
-- **Skills**: the turn, redacted, plus skill names and descriptions.
+- **Skills**: eligible turns are redacted, then sent with skill names and
+  descriptions. Sensitive turns, context-only follow-ups, and Hermes-generated
+  control messages are stopped locally before discovery or API use.
 - **Computer and browser use**: the goal, short element labels, and your action descriptions. Never screenshots, page text or field values. A goal or label that looks sensitive is refused before sending.
 
 Logs hold decisions only (tier, model, confidence, latency). Never prompt text.

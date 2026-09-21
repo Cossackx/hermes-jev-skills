@@ -1,7 +1,7 @@
 ---
 name: jev-skill-select
 description: Use when you have many skills installed and are unsure which one, if any, applies to the current request, or when asked to make skill loading cheaper or more accurate. Jev ranks the whole skill catalog against the turn and says whether any skill is needed at all.
-version: 0.1.0
+version: 0.2.0
 license: MIT
 metadata:
   hermes:
@@ -14,7 +14,15 @@ Two requests, about 0.9 s for a few hundred skills. The first ranks every skill 
 
 ## On Hermes
 
-`/jev skills on` makes the `hermes-jev` plugin do this once per fresh turn. When a skill clearly fits, a one-line suggestion is attached to the turn naming it; load it with `skill_view` unless it plainly does not apply. It reads the profile's skills folder and respects `skills.disabled`.
+Start with `/jev skills shadow`: eligible turns are evaluated and safe metadata,
+the top two candidates, and latency are logged, but nothing is attached to the
+turn. `/jev skills on` may attach at most two advisory candidates. Load only the
+ones that apply. The plugin follows Hermes' profile-aware skill roots and
+respects disabled skills.
+
+Exact context-only follow-ups (`continue`, `make it so`, `proceed`, `do it`) and
+Hermes-generated control messages defer immediately to Hermes' conversation-aware
+selection. Sensitive turns are stopped before discovery or Jev use.
 
 ## Asking directly (any agent)
 

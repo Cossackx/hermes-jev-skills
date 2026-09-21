@@ -11,7 +11,7 @@ A person pointed you here to give their agent Jev. Follow these steps in order. 
 1. **Get the code** (skip if it is already on disk):
 
    ```bash
-   git clone https://github.com/kerpopule/hermes-jev-skills ~/hermes-jev-skills
+   git clone --branch hardening/skill-shadow-0.3.3 https://github.com/Cossackx/hermes-jev-skills ~/hermes-jev-skills
    ```
 
 2. **Preview, then install.** Show the person what `--check` reports before running the real thing. It detects Hermes, Claude Code and Codex and installs for each. It edits one list (`plugins.enabled`) in each Hermes `config.yaml`, with a timestamped backup beside it.
@@ -42,21 +42,19 @@ A person pointed you here to give their agent Jev. Follow these steps in order. 
 
    `key.present` and `jev.reachable` must both be true.
 
-5. **Model pools** (only if `routing.tiers_configured` is empty):
+5. **Hermes only.** Plugins load when a session or gateway starts. Do not restart
+   a running gateway unless the person asks. Tell them to run `/jev skills shadow`
+   in a new session and inspect `logs/jev-decisions.jsonl`. Enable `/jev skills on`
+   only after the observations contain no confidently wrong selections.
 
-   ```bash
-   jev models suggest --write
-   ```
-
-   Then show the person the pools and ask whether they want specific models first for coding, writing, research or vision. Copy model ids from `jev models list --search <name>`; never invent one.
-
-6. **Hermes only.** Plugins load when a session or gateway starts. Do not restart a running gateway unless the person asks. Tell them to run `/jev routing shadow` in a new session, watch a day of decisions in `logs/jev-decisions.jsonl`, then `/jev routing on`.
-
-7. **Report** in three or four sentences: what was installed where, that the key is connected, what routing mode is set, and what needs a restart.
+6. **Report** in three or four sentences: what was installed where, that the key
+   is connected, the skill-observer mode, and what needs a fresh session.
 
 ## Using it afterwards
 
-Read the skill that matches the task: `jev-model-routing`, `jev-memory`, `jev-compaction`, `jev-skill-select`, `jev-computer-use`, `jev-browser-use`, `jev-setup`. Every `jev` subcommand takes JSON on stdin and answers JSON on stdout, and every one returns a usable fail-open answer when Jev is unavailable, so never block on it.
+The Hermes plugin in this branch exposes only `jev-skill-select`. Other library
+modules remain source material and CLI experiments; they are not registered in
+Hermes and must not be treated as enabled. Never block on Jev.
 
 ## Keeping it current
 
