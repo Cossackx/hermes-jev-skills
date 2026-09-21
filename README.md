@@ -45,7 +45,7 @@ python3 ~/hermes-jev-skills/install.py
 jev setup-key
 ```
 
-The installer finds Hermes, Claude Code and Codex on the machine and installs for each one it finds. `python3 install.py --check` shows what it would do without changing anything; `--uninstall` reverses it.
+The installer finds Hermes, Claude Code and Codex on the machine and installs for each one it finds. It writes an installer-owned `jev` launcher that points at the retained checkout, including when Windows cannot create a symlink. `python3 install.py --check` shows what it would do without changing anything; `--uninstall` reverses it.
 
 ## Your API key never touches the agent
 

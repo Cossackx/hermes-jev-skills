@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.5 (2026-09-21)
+
+- Fixed installer edits of `plugins.enabled`: block-list members now inherit the
+  configured child indentation, non-empty inline lists expand under their
+  existing key without losing its comment, and CRLF files retain CRLF endings.
+- Replaced the installed `jev` file link with an installer-owned launcher that
+  records the retained checkout path, so the command continues to find
+  `jevkit` when Windows cannot create a symlink and would otherwise hardlink it.
+
 ## 0.3.4 (2026-09-21)
 
 - Hardened `jev-browser-use` for Jev Ultrafast on dedicated Browser Harness/CDP

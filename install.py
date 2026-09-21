@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -97,6 +98,19 @@ def _remove(path: Path) -> bool:
     return False
 
 
+def _leading_indent(line: str) -> str:
+    return line[:len(line) - len(line.lstrip(" \t"))]
+
+
+def _child_indent(parent: str, lines: List[str]) -> str:
+    """Return the established child indentation, or a conservative default."""
+    indents = [_leading_indent(line) for line in lines
+               if line.strip() and not line.lstrip().startswith("#") and len(_leading_indent(line)) > len(parent)]
+    if indents:
+        return min(indents, key=len)
+    return parent + ("\t" if "\t" in parent else "  ")
+
+
 # ── Hermes ───────────────────────────────────────────────────────────────────
 
 def hermes_homes(root: Path) -> List[Path]:
@@ -112,37 +126,54 @@ def enable_plugin(config: Path, enable: bool) -> str:
 
     A text edit, not a YAML round-trip: comments, ordering and every other setting survive.
     """
-    text = config.read_text(encoding="utf-8")
-    lines = text.split("\n")
+    with config.open("r", encoding="utf-8", newline="") as handle:
+        text = handle.read()
+    newline = "\r\n" if "\r\n" in text else "\n"
+    trailing_newline = text.endswith(("\n", "\r"))
+    lines = text.splitlines()
     try:
-        start = next(i for i, line in enumerate(lines) if line.rstrip() == "plugins:")
+        start = next(i for i, line in enumerate(lines)
+                     if re.match(r"^[ \t]*plugins:\s*(?:#.*)?$", line))
     except StopIteration:
         if not enable:
             return "no plugins section"
-        lines += ["plugins:", "  enabled:", f"  - {PLUGIN}"]
+        lines += ["plugins:", "  enabled:", f"    - {PLUGIN}"]
         start = None
     if start is not None:
-        end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i].startswith((" ", "#"))), len(lines))
+        plugins_indent = _leading_indent(lines[start])
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].strip() and not lines[i].lstrip().startswith("#")
+                    and len(_leading_indent(lines[i])) <= len(plugins_indent)), len(lines))
         block = lines[start + 1:end]
-        item = re.compile(rf"^\s*-\s*['\"]?{re.escape(PLUGIN)}['\"]?\s*$")
+        item = re.compile(rf"^[ \t]*-[ \t]*['\"]?{re.escape(PLUGIN)}['\"]?[ \t]*(?:#.*)?$")
+        child_indent = _child_indent(plugins_indent, block)
         key = next((i for i, line in enumerate(block)
-                    if re.match(r"^  enabled:\s*(?:\[[^\]]*\])?\s*(?:#.*)?$", line)), None)
+                    if _leading_indent(line) == child_indent
+                    and re.match(r"^[ \t]+enabled:\s*(?:\[[^\]]*\])?\s*(?:#.*)?$", line)), None)
         if key is not None:
-            inline = re.match(r"^  enabled:\s*\[([^\]]*)\]\s*(#.*)?$", block[key])
+            key_indent = _leading_indent(block[key])
+            inline = re.match(r"^[ \t]+enabled:\s*\[([^\]]*)\](\s*(?:#.*)?)$", block[key])
             if inline:
                 items = [item.strip() for item in re.findall(
                     r'"[^"]*"|\'[^\']*\'|[^,]+', inline.group(1)) if item.strip()]
-                comment = f" {inline.group(2)}" if inline.group(2) else ""
-                block[key] = f"  enabled:{comment}"
-                block[key + 1:key + 1] = [f"  - {item}" for item in items]
+                block[key] = f"{key_indent}enabled:{inline.group(2)}"
+                list_indent = _child_indent(key_indent, block[key + 1:])
+                block[key + 1:key + 1] = [f"{list_indent}- {item}" for item in items]
         present = [i for i, line in enumerate(block) if item.match(line)]
         if enable:
             if present:
                 return "already enabled"
             if key is None:
-                block.insert(0, "  enabled:")
+                key_indent = child_indent
+                block.insert(0, f"{key_indent}enabled:")
                 key = 0
-            block.insert(key + 1, f"  - {PLUGIN}")
+            else:
+                key_indent = _leading_indent(block[key])
+            list_indent = next((_leading_indent(line) for line in block[key + 1:]
+                                if re.match(r"^[ \t]+-[ \t]+", line)
+                                and len(_leading_indent(line)) > len(key_indent)),
+                               _child_indent(key_indent, block[key + 1:]))
+            block.insert(key + 1, f"{list_indent}- {PLUGIN}")
         else:
             if not present:
                 return "was not enabled"
@@ -152,7 +183,9 @@ def enable_plugin(config: Path, enable: bool) -> str:
     backup = config.with_name(f"{config.name}.bak-jev-{time.strftime('%Y%m%dT%H%M%S')}")
     shutil.copy2(config, backup)
     temp = config.with_name(config.name + ".jev-tmp")
-    temp.write_text("\n".join(lines), encoding="utf-8")
+    rendered = newline.join(lines) + (newline if trailing_newline else "")
+    with temp.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(rendered)
     os.replace(temp, config)
     return "enabled" if enable else "disabled"
 
@@ -210,10 +243,30 @@ def install_skills(folder: Path, check: bool) -> Dict[str, object]:
 def install_cli(check: bool) -> Dict[str, object]:
     target = Path.home() / ".local" / "bin" / "jev"
     if not check:
-        _link(REPO / "bin" / "jev", target)
+        _write_cli_launcher(target)
     on_path = str(target.parent) in os.environ.get("PATH", "").split(os.pathsep)
     return {"command": str(target), "on_path": on_path,
             **({} if on_path else {"hint": f"add {target.parent} to PATH, or call {REPO / 'bin' / 'jev'} directly"})}
+
+
+def _write_cli_launcher(target: Path, repo: Path = REPO) -> None:
+    """Install a launcher that retains the checkout location through hardlink fallback."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _remove(target)
+    source = str(repo.resolve())
+    launcher = (
+        "#!/bin/sh\n"
+        "# Installed by Hermes Jev Skills. The retained checkout supplies jevkit.\n"
+        f"repo={shlex.quote(source)}\n"
+        "if [ ! -f \"$repo/jevkit/__main__.py\" ]; then\n"
+        "  printf '%s\\n' \"jev: source checkout is missing: $repo\" >&2\n"
+        "  exit 1\n"
+        "fi\n"
+        "PYTHONPATH=\"$repo${PYTHONPATH:+:$PYTHONPATH}\" exec python3 -m jevkit \"$@\"\n"
+    )
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(launcher)
+    target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
 def main() -> int:

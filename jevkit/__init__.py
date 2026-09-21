@@ -1,2 +1,2 @@
 """Hermes Jev Skills: fast, cheap decisions for agents, powered by TypeSafe Jev."""
-__version__ = "0.3.4"
+__version__ = "0.3.5"
