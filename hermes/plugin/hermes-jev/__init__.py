@@ -112,6 +112,23 @@ def _disabled_skills() -> Any:
         return set()
 
 
+def _hermes_skill_roots() -> List[Path]:
+    """Hermes's own answer for the session in flight, or [] when it cannot be asked.
+
+    The plugin used to derive the roots from ``HERMES_HOME`` alone. Under a named profile
+    that home can still be the default one, so Jev ranked the DEFAULT profile's catalog and
+    suggested skills the running profile cannot open at all (three of them in two sessions:
+    ``skill_view`` answered "not found" every time). Hermes already knows the answer per
+    session, profile and ``skills.external_dirs`` included, so ask it instead of guessing.
+    """
+    try:
+        from agent.skill_utils import get_all_skills_dirs  # type: ignore
+
+        return [Path(root) for root in get_all_skills_dirs()]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _skill_roots() -> List[Path]:
     """Every folder Hermes loads skills from, or the one this profile owns when that cannot be known.
 
@@ -125,6 +142,9 @@ def _skill_roots() -> List[Path]:
     config.yaml with a small stdlib reader that gives up on anchors and multi-line lists.
     """
     single = [_home() / "skills"]
+    hermes = _hermes_skill_roots()
+    if hermes:
+        return hermes
     finder = getattr(skillpick, "discover_roots", None)
     if not callable(finder):
         return single
@@ -142,6 +162,32 @@ def _skill_roots() -> List[Path]:
 
 # ── hooks ────────────────────────────────────────────────────────────────────
 
+def _reachable_skill(name: str) -> Optional[str]:
+    """The name Hermes itself can open for THIS session, or None when it cannot open it.
+
+    A ranked name is a guess about a folder, and a wrong guess costs the agent a
+    ``skill_view`` call that fails: it is told to load a procedure it does not have. That
+    is exactly what happened with ``product-runtime-feature-audits``,
+    ``delegated-work-followthrough`` and ``macos-third-party-software-installation`` -- all
+    three exist on disk, none of them in the running profile's catalog. So ask Hermes's own
+    loader, the same one behind the skill_view tool, and stay silent when it says no.
+
+    Anything that stops us asking (an older Hermes with no such module, a loader that
+    raises) means silence too: a suggestion is never worth a turn, and a name that was
+    never verified is not worth one either.
+    """
+    if not name:
+        return None
+    try:
+        from tools.skills_tool import skill_view  # type: ignore
+
+        loaded = json.loads(skill_view(name, preprocess=False))
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(loaded, dict) or not loaded.get("success"):
+        return None
+    return str(loaded.get("name") or name)
+
 def _on_pre_llm_call(session_id: str = "", turn_id: Any = None, user_message: Any = "", **_: Any) -> Any:
     text = user_message if isinstance(user_message, str) else json.dumps(user_message, default=str)[:6000]
     with _LOCK:
@@ -156,7 +202,11 @@ def _on_pre_llm_call(session_id: str = "", turn_id: Any = None, user_message: An
     if not picked.get("skills"):
         return None
     skill = picked["skills"][0]
-    return {"context": f"[Jev skill suggestion] `{skill['name']}` looks like the right procedure for this turn "
+    resolved = _reachable_skill(skill["name"])
+    if not resolved:
+        _log({"kind": "skill_unreachable", "candidate": skill["name"], "status": picked.get("status")})
+        return None
+    return {"context": f"[Jev skill suggestion] `{resolved}` looks like the right procedure for this turn "
                        f"(match {skill['match']}). Load it with skill_view before starting, unless it clearly does not apply."}
 
 
