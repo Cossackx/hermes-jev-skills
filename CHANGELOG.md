@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.4 (2026-09-21)
+
+- Hardened `jev-browser-use` for Jev Ultrafast on dedicated Browser Harness/CDP
+  automation browsers: Windows virtualenv discovery, explicit HTTP or WebSocket
+  endpoint mapping and refusal without one, and activation of only the agent's
+  owned target before the bounded decision loop.
+- Documented the Chrome 153+ background-target listbox limitation and the
+  dedicated-browser launcher/fallback workflow; added offline runner coverage.
+
 ## 0.3.3 (2026-09-21) — bounded skill-observer fork
 
 - Narrowed the Hermes plugin to skill observation only: one `pre_llm_call` hook,

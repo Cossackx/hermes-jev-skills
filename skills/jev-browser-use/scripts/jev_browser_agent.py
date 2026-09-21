@@ -30,14 +30,15 @@ import json
 import os
 import subprocess
 import sys
+import time
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 from urllib.parse import urlparse
 
-REPO = Path(os.environ.get("JEV_ULTRAFAST_REPO") or Path.home() / "jev-ultrafast").expanduser()
-VENV_PY = REPO / ".venv" / "bin" / "python"
 KEYCHAIN_TYPESAFE = ("Hermes TypeSafe API", "TYPESAFE_API_KEY")
 DEFAULT_TEXT_MODEL = "google/gemini-2.5-flash"
 DEFAULT_TEXT_BASE = "https://openrouter.ai/api/v1"
+ACTIVATION_SETTLE_SECONDS = 0.15
 
 
 # ─ credentials ──────────────────────────────────────────────────────────────
@@ -113,7 +114,69 @@ def outcome_verified(title: str, heading: str, url: str, expect: str) -> bool:
 
 # ── runner ───────────────────────────────────────────────────────────────────
 
-def ensure_importable(argv: list[str] | None = None) -> None:
+def resolve_ultrafast_repo(env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                           home: Path | None = None) -> Path:
+    """Find a local Jev Ultrafast checkout without embedding a machine path."""
+    source_env = os.environ if env is None else env
+    override = source_env.get("JEV_ULTRAFAST_REPO", "").strip()
+    if override:
+        return Path(override).expanduser()
+
+    cwd = (cwd or Path.cwd()).expanduser()
+    home = (home or Path.home()).expanduser()
+    candidates = [cwd / "jev-ultrafast", home / "jev-ultrafast"]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[-1]
+
+
+def venv_python(repo: Path, platform: str | None = None) -> Path:
+    """Return the platform-native Python in the Jev Ultrafast virtualenv."""
+    platform = os.name if platform is None else platform
+    if platform == "nt":
+        return repo / ".venv" / "Scripts" / "python.exe"
+    return repo / ".venv" / "bin" / "python"
+
+
+def resolve_cdp_endpoint(cdp: str, env: Mapping[str, str]) -> tuple[str, str]:
+    """Return the Browser Harness variable for an explicitly supplied endpoint."""
+    endpoint = cdp.strip() or env.get("BU_CDP_URL", "").strip() or env.get("BU_CDP_WS", "").strip()
+    if not endpoint:
+        raise ValueError(
+            "no dedicated CDP endpoint; use a maintained automation-browser launcher or "
+            "supply --cdp, BU_CDP_URL, or BU_CDP_WS"
+        )
+    scheme = urlparse(endpoint).scheme.lower()
+    if scheme in {"http", "https"}:
+        return "BU_CDP_URL", endpoint
+    if scheme in {"ws", "wss"}:
+        return "BU_CDP_WS", endpoint
+    raise ValueError("CDP endpoint must start with http://, https://, ws://, or wss://")
+
+
+def configure_cdp_endpoint(cdp: str, env: MutableMapping[str, str]) -> tuple[str, str]:
+    """Install exactly one explicit Browser Harness CDP endpoint in ``env``."""
+    name, endpoint = resolve_cdp_endpoint(cdp, env)
+    env.pop("BU_CDP_URL", None)
+    env.pop("BU_CDP_WS", None)
+    env[name] = endpoint
+    return name, endpoint
+
+
+def activate_owned_target(agent, cdp_call=None, sleep=None) -> str:
+    """Activate only the page target created by this Agent, then let it settle."""
+    target = getattr(getattr(agent, "browser", None), "target", None)
+    if not isinstance(target, str) or not target:
+        raise RuntimeError("Jev Ultrafast did not expose its owned browser target")
+    if cdp_call is None:
+        from browser_harness.helpers import cdp as cdp_call  # type: ignore[import-not-found]
+    cdp_call("Target.activateTarget", targetId=target)
+    (time.sleep if sleep is None else sleep)(ACTIVATION_SETTLE_SECONDS)
+    return target
+
+
+def ensure_importable(argv: list[str] | None = None, repo: Path | None = None) -> None:
     """Re-exec into the vendored venv when jev_ultrafast is not importable.
 
     Forwards the arguments this run was actually invoked with. Never uses
@@ -126,12 +189,14 @@ def ensure_importable(argv: list[str] | None = None) -> None:
         return
     except ModuleNotFoundError:
         pass
-    if VENV_PY.exists() and Path(sys.executable).resolve() != VENV_PY.resolve():
+    repo = repo or resolve_ultrafast_repo()
+    venv_py = venv_python(repo)
+    if venv_py.exists() and Path(sys.executable).resolve() != venv_py.resolve():
         forwarded = list(argv) if argv is not None else sys.argv[1:]
-        os.execv(str(VENV_PY), [str(VENV_PY), str(Path(__file__).resolve()), *forwarded])
+        os.execv(str(venv_py), [str(venv_py), str(Path(__file__).resolve()), *forwarded])
     raise SystemExit(
         "jev_ultrafast is not importable and no vendored venv was found at "
-        f"{VENV_PY}. Clone https://github.com/browser-use/jev-ultrafast, run `uv sync` in it, "
+        f"{venv_py}. Clone https://github.com/browser-use/jev-ultrafast, run `uv sync` in it, "
         "and set JEV_ULTRAFAST_REPO to that folder."
     )
 
@@ -144,14 +209,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated host allowlist. The run aborts if the page leaves it.")
     p.add_argument("--max-ticks", type=int, default=10, help="Hard cap on Jev calls (default 10).")
     p.add_argument("--expect", default="", help="Substring that must appear in title/h1/url to PASS.")
-    p.add_argument("--cdp", default=os.environ.get("BU_CDP_WS", ""),
-                   help="Existing CDP websocket. Defaults to BU_CDP_WS / the attached browser.")
+    p.add_argument("--cdp", default="", metavar="ENDPOINT",
+                   help="Dedicated CDP endpoint (http(s) or ws(s)); never a daily browser.")
     p.add_argument("--json", action="store_true", help="Emit a machine-readable result as the last line.")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    try:
+        endpoint_name, _endpoint = configure_cdp_endpoint(args.cdp, os.environ)
+    except ValueError as exc:
+        print(f"FAIL: {exc}")
+        return 2
+    print(f"dedicated browser endpoint configured via {endpoint_name}")
 
     creds = resolve_credentials(dict(os.environ))
     print(f"typesafe: {redact(creds.get('TYPESAFE_API_KEY'))} model={creds['TYPESAFE_MODEL']}")
@@ -170,10 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     if not host_allowed(args.url, allow):
         print(f"FAIL: start URL host is not in the allowlist {allow}.")
         return 2
-    if args.cdp:
-        os.environ["BU_CDP_WS"] = args.cdp
-
-    ensure_importable(argv)
+    ensure_importable(argv, repo=resolve_ultrafast_repo())
 
     from jev_ultrafast import Agent
 
@@ -181,6 +250,12 @@ def main(argv: list[str] | None = None) -> int:
     left_allowlist = False
     final_url = title = heading = ""
     with Agent(args.url, args.goal) as agent:
+        try:
+            target = activate_owned_target(agent)
+            print(f"  activated owned target: {target}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"FAIL: could not activate the owned target: {type(exc).__name__}: {str(exc)[:200]}")
+            return 2
         try:
             for _state in agent.run():
                 ticks += 1

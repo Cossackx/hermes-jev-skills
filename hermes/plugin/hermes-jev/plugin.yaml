@@ -1,5 +1,5 @@
 name: hermes-jev
-version: 0.3.3
+version: 0.3.4
 description: TypeSafe Jev observes skill selection in shadow mode and can provide two advisory candidates without changing models, tools, or answers.
 author: Steve Darlow
 license: MIT
