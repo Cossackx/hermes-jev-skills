@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.5.0 — measured selection and privacy-safe effectiveness
+
+- Add an experimental one-request selector and a conservative `auto` mode that
+  uses it only for a single explicitly named, non-compound skill request;
+  established two-stage selection remains the control and fallback.
+- Cache the native eligible-skill catalog for five seconds, invalidating on
+  profile, roots, root metadata, disabled skills, HMAC-bound environment values,
+  platform, or bounded expiry without retaining environment secrets.
+- Record request bytes, attempts, provider usage, selector strategy, and stage
+  latency without changing match or privacy checks.
+- Add profile-local, HMAC-correlated effectiveness telemetry for decisions,
+  advice, actual skill loads, tool/API outcomes, turn outcomes, usage buckets,
+  and loaded-context buckets. Prompt, response, tool payload, error text, paths,
+  URLs, and raw correlation IDs are never retained.
+- Add a read-only dashboard effectiveness rollup that exposes aggregates only,
+  reads complete bounded regular-file segments, and rejects linked storage.
+- Add a balanced 120-case held-out dataset and source-bound resumable live
+  benchmark whose failed trials remain auditable and retryable.
+
+## 0.4.2 — native skill eligibility and threshold integrity
+
+- Reuse Hermes' native frontmatter parser, scan order, disabled state, and
+  platform/environment eligibility for automatic skill advice.
+- Parse folded and literal YAML descriptions correctly in the standalone
+  fallback instead of exposing block markers such as `>-` as descriptions.
+- Require exact-name reserve candidates to meet the configured match threshold;
+  lexical recovery can no longer inject a below-threshold suggestion.
+- Add offline regressions for YAML block scalars, platform filtering, root
+  precedence, disabled skills, threshold enforcement, and native discovery.
+
+## 0.4.1 — credential isolation and pinned decisions
+
+- Propagate a separate copy of caller context into each skill shortlist worker,
+  preserving both the host profile and credential resolver. Missing or failing
+  profile credentials cannot fall back to an ambient key in worker threads.
+- Pin the shared client default to `jev-1.13.0`; explicit model overrides remain
+  supported. Jev is the decision model, not the Hermes conversation model.
+- Add offline regressions for concurrent profile separation, missing and broken
+  credential resolvers, and the model sent on the wire.
+- Automatic skill advice remains independently switchable with `/jev skills off`;
+  this does not disable the explicit advisory tools or change the Hermes model.
+
+## 0.4.0 — explicit decision integration
+
+- Added profile-gated native routing advice, retrieval ranking, compaction
+  selection and browser/desktop action-choice tools, with strict bounded inputs.
+- Added automatic same-provider selection before fresh Hermes CLI sessions;
+  explicit model arguments bypass routing. No live gateway wire-model rewrite.
+- Bound native Jev calls to Hermes' active secret scope; missing profile keys
+  cannot fall through to another profile's environment or a shared key store.
+- Preserved fail-open selection, privacy checks, normal approvals and the native
+  compressor. Added tests for isolation, mode changes and malformed inputs.
+- Existing installer fixes and unrelated local changes remain preserved.
+
+## 0.3.6 (2026-09-22)
+
+- Prevented ambiguous Hermes skill names when a configured `skills.external_dirs`
+  root already exposes all Jev skills, including categorized recursive roots and
+  scalar, flow-list, or block-list configuration forms. Check mode now predicts
+  the post-install shared roots instead of reporting the opposite projection.
+- Kept a profile-local bundle when an external path resolves through that same
+  bundle, and only replaces or uninstalls links, junctions, or byte-identical
+  installer bundles. Modified or unrelated local content is preserved and
+  reported as a conflict.
+
 ## 0.3.5 (2026-09-21)
 
 - Fixed installer edits of `plugins.enabled`: block-list members now inherit the

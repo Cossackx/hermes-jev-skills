@@ -19,7 +19,9 @@ import json
 import os
 import re
 import shutil
+import stat
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -52,16 +54,14 @@ SLOT_GROUPS = {s[0]: s[2] for s in AUX_SLOTS}
 
 MAIN_LABEL = "Main model (user-facing responses)"
 
-#: Jev mode is implemented in a candidate commit, not in the running release.
 JEV_MODE = {
     "key": "jev/state.json",
     "installed": True,
-    "intent": "Jev reads each fresh turn and picks the cheapest model that is good enough, from the "
-              "simple / medium / hard pools in <hermes home>/jev/routing.json. Any model on the connected "
-              "provider can be in a pool.",
-    "desired_default": "shadow",
-    "note": "Routing is done by the hermes-jev plugin. The switch above takes effect on the next message. "
-            "Press Live to watch decisions as they happen. Inside Hermes the same switch is /jev routing on|shadow|off.",
+    "intent": "Jev routing is advisory: it can recommend a configured same-provider model and support a "
+              "separate fresh CLI launch. It never switches the active Hermes gateway model.",
+    "desired_default": "off",
+    "note": "The switch gates the advisory routing tool and fresh-launch workflow. Inside Hermes the same "
+            "switch is /jev routing on|off; neither setting changes an active conversation's model.",
 }
 
 _SAFE_PROVIDER = re.compile(r"^[A-Za-z0-9._\-]*$")
@@ -526,29 +526,185 @@ def jev_live(hermes_home: str, since: float = 0.0, limit: int = 200) -> dict[str
             "by_model": sorted(by_model.items(), key=lambda kv: -kv[1])[:12]}
 
 
-JEV_SWITCHES = {"routing": ("off", "shadow", "on"), "skills": ("off", "on"), "notice": ("off", "on")}
+def _jev_effectiveness_rollup(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    events = Counter(str(row.get("event") or "unknown") for row in rows)
+    advised = [row for row in rows if row.get("event") == "skill_advice"]
+    loaded = [row for row in rows if row.get("event") == "skill_view_loaded"]
+
+    def join(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
+        values = (row.get("_profile_name"), row.get("session_id"), row.get("turn_id"), row.get("skill"))
+        return tuple(str(value) for value in values) if all(values) else None
+
+    latest_load: dict[tuple[str, str, str, str], float] = {}
+    for row in loaded:
+        key = join(row)
+        if key is not None:
+            latest_load[key] = max(latest_load.get(key, 0.0), float(row.get("ts") or 0.0))
+    decisions = [row for row in rows if row.get("event") == "decision"]
+    tool_rows = [row for row in rows if row.get("event") == "tool_outcome"]
+    tool_groups = Counter(
+        (row.get("_profile_name"), row.get("session_id"), row.get("turn_id"), row.get("tool_name"))
+        for row in tool_rows if row.get("session_id") and row.get("turn_id") and row.get("tool_name")
+    )
+    missing = Counter(
+        name for row in rows for name in ("session_id", "turn_id", "task_id", "request_id", "call_id")
+        if row.get(name) is None
+    )
+    api_rows = [row for row in rows if row.get("event") in ("api_attempt", "api_outcome")]
+    api_outcomes = [row for row in rows if row.get("event") == "api_outcome"]
+    return {
+        "schema": "jev.effectiveness.v1", "total_events": len(rows), "events": dict(events),
+        "coverage": {
+            "joinable_advice": sum(join(row) is not None for row in advised),
+            "joinable_loads": sum(join(row) is not None for row in loaded),
+            "unjoined_events": sum(row.get("join_status") == "unjoined" for row in rows),
+        },
+        "missing_ids": dict(missing),
+        "advice_to_load": {
+            "advised": len(advised), "loaded": len(loaded),
+            "matched": sum(latest_load.get(join(row), -1) >= float(row.get("ts") or 0)
+                           for row in advised if join(row) is not None),
+            "unjoinable": sum(join(row) is None for row in advised),
+        },
+        "decisions": {
+            "total": len(decisions),
+            "statuses": dict(Counter(str(row.get("outcome") or "unknown") for row in decisions)),
+            "strategies": dict(Counter(str(row.get("strategy") or "unknown") for row in decisions)),
+            "modes": dict(Counter(str(row.get("mode") or "unknown") for row in decisions)),
+            "candidate_counts": dict(Counter(str(row.get("candidate_count", "unknown")) for row in decisions)),
+            "latency_buckets": dict(Counter(str(row.get("latency_bucket") or "unknown") for row in decisions)),
+            "request_bytes_buckets": dict(Counter(str(row.get("request_bytes_bucket") or "unknown") for row in decisions)),
+        },
+        "tool_outcomes": dict(Counter(str(row.get("outcome") or "unknown") for row in tool_rows)),
+        "subsequent_calls": sum(max(0, count - 1) for count in tool_groups.values()),
+        "loaded_context_buckets": dict(Counter(str(row.get("content_bucket") or "unknown") for row in loaded)),
+        "api": dict(Counter("attempt" if row.get("event") == "api_attempt" else str(row.get("outcome") or "unknown")
+                            for row in api_rows)),
+        "api_routes": dict(Counter(f"{row.get('provider', 'unknown')}:{row.get('model', 'unknown')}"
+                                   for row in api_outcomes)),
+        "turn_outcomes": dict(Counter(str(row.get("outcome") or "unknown") for row in rows
+                                      if row.get("event") == "turn_outcome")),
+        "feedback": dict(Counter(str(row.get("outcome") or "unknown") for row in rows
+                                 if row.get("event") == "feedback")),
+        "token_buckets": {
+            direction: dict(Counter(str(row.get(f"{direction}_bucket") or "unknown") for row in api_outcomes))
+            for direction in ("input", "output", "cache_read", "cache_write", "reasoning")
+        },
+    }
+
+
+def jev_effectiveness(hermes_home: str, since: float = 0.0, profile: str | None = None) -> dict[str, Any]:
+    """Aggregate profile-local Jev effectiveness events without returning correlation IDs or raw rows."""
+    homes = dict(_jev_homes(hermes_home))
+    if profile is not None and profile not in homes:
+        raise ValueError(f"unknown profile: {profile!r}")
+    selected = [(profile, homes[profile])] if profile is not None else list(homes.items())
+    all_rows: list[dict[str, Any]] = []
+    by_profile: dict[str, dict[str, Any]] = {}
+    sources: dict[str, dict[str, Any]] = {}
+    for name, home in selected:
+        directory = os.path.join(home, "jev", "effectiveness")
+        rows: list[dict[str, Any]] = []
+        bytes_read = 0
+        segments_read = 0
+        rejected_segments = 0
+        omitted_segments = 0
+        try:
+            paths = [os.path.join(directory, item) for item in os.listdir(directory)
+                     if re.fullmatch(r"events\.jsonl(?:\.\d+)?", item)]
+        except OSError:
+            paths = []
+        for path in sorted(paths):
+            fd = None
+            try:
+                if os.path.islink(path):
+                    rejected_segments += 1
+                    continue
+                base = os.path.realpath(directory)
+                resolved = os.path.realpath(path)
+                if os.path.commonpath((base, resolved)) != base:
+                    rejected_segments += 1
+                    continue
+                flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(path, flags)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    rejected_segments += 1
+                    continue
+                if info.st_size > 16_000_000 or bytes_read + info.st_size > 64_000_000:
+                    omitted_segments += 1
+                    continue
+                with os.fdopen(fd, "rb") as stream:
+                    fd = None
+                    data = stream.read(16_000_001)
+                if len(data) > 16_000_000:
+                    omitted_segments += 1
+                    continue
+                lines = data.decode("utf-8", errors="replace").splitlines()
+                bytes_read += len(data)
+                segments_read += 1
+            except (OSError, ValueError):
+                rejected_segments += 1
+                continue
+            finally:
+                if fd is not None:
+                    os.close(fd)
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if (isinstance(row, dict) and row.get("schema") == "jev.effectiveness.v1"
+                        and isinstance(row.get("ts"), (int, float)) and float(row["ts"]) > since):
+                    rows.append({**row, "_profile_name": name})
+        by_profile[name] = _jev_effectiveness_rollup(rows)
+        sources[name] = {
+            "complete": omitted_segments == 0 and rejected_segments == 0,
+            "segments_read": segments_read,
+            "bytes_read": bytes_read,
+            "omitted_segments": omitted_segments,
+            "rejected_segments": rejected_segments,
+        }
+        all_rows.extend(rows)
+    return {"now": time.time(), "since": since, "profiles": by_profile, "sources": sources,
+            "overall": _jev_effectiveness_rollup(all_rows)}
+
+
+JEV_SWITCHES = {
+    "routing": ("off", "on"),
+    "skills": ("off", "shadow", "on"),
+    "selector": ("control", "fast", "auto"),
+    "notice": ("off", "on"),
+}
+JEV_SWITCH_DEFAULTS = {name: ("control" if name == "selector" else "off") for name in JEV_SWITCHES}
 
 
 def jev_switch_state(hermes_home: str) -> dict[str, Any]:
-    """The shared default plus each profile's own override, and what each profile ends up with."""
+    """Report each profile's own state; Hermes profiles do not inherit default state."""
     def read(home: str) -> dict[str, str]:
         try:
             with open(os.path.join(home, "jev", "state.json"), "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            return {k: str(v) for k, v in data.items() if k in JEV_SWITCHES} if isinstance(data, dict) else {}
+            return {
+                k: str(v) for k, v in data.items()
+                if k in JEV_SWITCHES and str(v) in JEV_SWITCHES[k]
+            } if isinstance(data, dict) else {}
         except (OSError, ValueError):
             return {}
-    shared = read(hermes_home)
     profiles = {}
     for name, home in _jev_homes(hermes_home):
-        own = {} if home == hermes_home else read(home)
-        profiles[name] = {"own": own, "effective": {k: own.get(k, shared.get(k, "off")) for k in JEV_SWITCHES}}
-    return {"shared": {k: shared.get(k, "off") for k in JEV_SWITCHES}, "profiles": profiles,
+        own = read(home)
+        profiles[name] = {
+            "own": own,
+            "effective": {k: own.get(k, JEV_SWITCH_DEFAULTS[k]) for k in JEV_SWITCHES},
+        }
+    default_state = profiles.get("default", {"effective": dict(JEV_SWITCH_DEFAULTS)})["effective"]
+    return {"shared": dict(default_state), "profiles": profiles,
             "plugin_installed": os.path.isdir(os.path.join(hermes_home, "plugins", "hermes-jev"))}
 
 
 def set_jev_switch(hermes_home: str, scope: str, name: str, value: str) -> dict[str, Any]:
-    """scope "__all__" writes the shared default AND clears that switch in every profile, so it really is all.
+    """Scope ``__all__`` writes every profile home because profiles do not inherit state.
 
     The hermes-jev plugin reads these files on every turn, so this takes effect at once: no restart.
     """
@@ -577,12 +733,8 @@ def set_jev_switch(hermes_home: str, scope: str, name: str, value: str) -> dict[
         os.replace(tmp, path)
 
     if scope == "__all__":
-        write(hermes_home, lambda d: d.__setitem__(name, value))
-        for pname, home in homes.items():
-            if home != hermes_home:
-                write(home, lambda d: d.pop(name, None))
-    elif homes[scope] == hermes_home:
-        write(hermes_home, lambda d: d.__setitem__(name, value))
+        for home in homes.values():
+            write(home, lambda d: d.__setitem__(name, value))
     else:
         write(homes[scope], lambda d: d.__setitem__(name, value))
     return {"ok": True, "scope": scope, "switch": name, "value": value, **jev_switch_state(hermes_home)}

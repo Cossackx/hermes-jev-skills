@@ -121,10 +121,10 @@
   <div id="authWarn" style="display:none;padding:11px 14px;border-radius:11px;border:1px solid #7a4a12;background:#2a1d0d;color:#ffd7a6;font-size:13.5px"></div>
 
   <div class="card" id="jevCard">
-    <h2>Jev routing <span class="badge" id="jevBadge">…</span></h2>
+    <h2>Jev routing advice <span class="badge" id="jevBadge">…</span></h2>
     <div class="jevrow">
       <div class="seg" id="jevSeg" role="group" aria-label="Jev routing">
-        <button data-v="off">Off</button><button data-v="shadow">Shadow</button><button data-v="on">On</button>
+        <button data-v="off">Off</button><button data-v="on">On</button>
       </div>
       <span class="small" id="jevScope"></span>
     </div>
@@ -133,10 +133,10 @@
   </div>
 
   <div class="card" id="liveCard" style="display:none">
-    <h2>Jev live routing <span class="badge" id="liveBadge">…</span></h2>
+    <h2>Jev routing activity <span class="badge" id="liveBadge">…</span></h2>
     <div class="legend" id="liveModels" style="margin:0 0 12px"></div>
     <div class="livewrap"><table>
-      <thead><tr><th>Time</th><th>Profile</th><th>Decision</th><th>Kind of work</th><th>Routed to</th>
+      <thead><tr><th>Time</th><th>Profile</th><th>Decision</th><th>Kind of work</th><th>Recommended model</th>
         <th>Confidence</th><th>Jev</th><th>Note</th></tr></thead>
       <tbody id="liveBody"></tbody>
     </table></div>
@@ -558,8 +558,8 @@ $("#confirmBtn").onclick = async () => {
 };
 
 /* --- Jev routing switch ---
-   Follows the profile picker: "All profiles" sets the default for everyone (after a confirm),
-   a single profile sets just that one. The plugin reads the switch each turn, so no restart. */
+   Follows the profile picker: "All profiles" writes every profile (after a confirm),
+   a single profile writes just that one. The plugin reads its own switch each turn. */
 let SWITCHES = null;
 
 async function loadSwitches(){
@@ -583,16 +583,16 @@ function renderSwitch(){
   const own = !all && SWITCHES.profiles[CURRENT] && SWITCHES.profiles[CURRENT].own.routing;
   $("#jevScope").innerHTML = all
     ? "Jev routing for <b>all " + eff.length + " profiles</b>" + (value ? "" : " <span class='muted'>(currently mixed)</span>")
-    : "Jev routing for <b>" + esc(CURRENT) + "</b> <span class='muted'>(" + (own ? "its own setting" : "following the all-profiles default") + ")</span>";
-  $("#jevCounts").textContent = "Right now: " + count("on") + " on · " + count("shadow") + " shadow · " + count("off") +
-    " off.  On = Jev switches models. Shadow = Jev decides and logs but does not switch. Takes effect on the next message, no restart.";
+    : "Jev routing for <b>" + esc(CURRENT) + "</b> <span class='muted'>(" + (own ? "its own setting" : "using its local default") + ")</span>";
+  $("#jevCounts").textContent = "Right now: " + count("on") + " on · " + count("off") +
+    " off. On enables advisory model recommendations and fresh CLI launches; it never switches the active conversation model.";
 }
 
 document.querySelectorAll("#jevSeg button").forEach(b => b.onclick = async () => {
   const value = b.dataset.v, all = CURRENT === ALL;
   if (all){
     const n = Object.keys(SWITCHES ? SWITCHES.profiles : {}).length;
-    const ok = await askAll({"Jev routing": {mode: value + (value === "on" ? "  (Jev will switch models for every agent)" : "")}}, n);
+    const ok = await askAll({"Jev routing advice": {mode: value + (value === "on" ? "  (advice/fresh launches only; no active-model switching)" : "")}}, n);
     if (!ok) return;
   }
   const r = await fetch("/api/jev/switch", {method:"POST", headers:{"Content-Type":"application/json", ...HDR},
@@ -620,7 +620,7 @@ function liveRow(e, fresh){
              esc(e.specialty || ""), "<b>" + esc(model) + "</b>", e.confidence == null ? "" : Number(e.confidence).toFixed(2),
              (e.latency_ms || "") + (e.latency_ms ? " ms" : ""),
              esc((e.mode === "shadow" ? "shadow · " : "") + (e.private ? "private · " : "") +
-                 (e.tier ? (e.routed ? "switched" : "already on it") : (e.reason || "")))];
+                 (e.tier ? (e.routed ? "recommended" : "current model already matches") : (e.reason || "")))];
   }
   tr.innerHTML = cells.map((c, i) => "<td" + (i === 7 ? ' class="wrap"' : "") + ">" + c + "</td>").join("");
   return tr;
@@ -636,11 +636,11 @@ async function pollLive(){
   else LIVE_SEEN = LIVE_SEEN || r.now;
   const eff = SWITCHES ? Object.values(SWITCHES.profiles).map(p => p.effective.routing) : [];
   $("#liveBadge").textContent = r.plugin_installed
-    ? (eff.filter(x => x === "on").length + " routing · " + eff.filter(x => x === "shadow").length + " shadow") : "plugin not installed";
+    ? (eff.filter(x => x === "on").length + " advice enabled · " + eff.filter(x => x === "off").length + " off") : "plugin not installed";
   $("#liveModels").innerHTML = r.by_model.map(([m, c], i) =>
     '<span><span class="dot" style="background:' + PALETTE[i % PALETTE.length] + '"></span>' + esc(m.split(":").pop()) + " (" + c + ")</span>").join("");
   $("#liveEmpty").textContent = r.events.length ? "Decisions only. The text of a turn is never logged or shown here." :
-    "No decisions yet. Turn routing on for a profile with /jev routing on (or shadow to watch without switching), then send it a message.";
+    "No decisions yet. Enable advisory routing with /jev routing on, then explicitly request routing advice or use a fresh-launch workflow.";
 }
 
 $("#liveBtn").onclick = () => {

@@ -35,7 +35,7 @@ class InstallTests(unittest.TestCase):
             install._copy_observer_jevkit(destination)
             self.assertEqual(
                 sorted(path.name for path in destination.iterdir()),
-                ["__init__.py", "client.py", "keystore.py", "privacy.py", "skillpick.py"],
+                sorted(install.OBSERVER_JEVKIT),
             )
 
     def test_enable_and_disable_touch_only_the_list(self):
@@ -115,7 +115,8 @@ class InstallTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout.strip(), "0.3.5")
+            from jevkit import __version__
+            self.assertEqual(result.stdout.strip(), __version__)
             self.assertTrue(install._remove(launcher))
             self.assertFalse(launcher.exists())
 
@@ -144,6 +145,73 @@ class InstallTests(unittest.TestCase):
             self.assertIn("/jev skills shadow", next_steps)
             self.assertNotIn("routing", next_steps.lower())
 
+    def test_external_dirs_parser_accepts_scalar_and_flow_list_but_not_nested_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            config = base / "config.yaml"
+            config.write_text(
+                "skills:\n"
+                "  cache:\n"
+                "    external_dirs: ignored\n"
+                "  external_dirs: ['shared#one', shared-two] # keep\n"
+            )
+            self.assertEqual(
+                install._configured_external_dirs(config),
+                [base / "shared#one", base / "shared-two"],
+            )
+            config.write_text("skills:\n  external_dirs: 'single root' # keep\n")
+            self.assertEqual(install._configured_external_dirs(config), [base / "single root"])
+            config.write_text("skills:\n  cache:\n    external_dirs: nested-only\n")
+            self.assertEqual(install._configured_external_dirs(config), [])
+
+    def test_check_predicts_shared_skills_that_the_real_install_will_create(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            shared = home / ".agents" / "skills"
+            shared.parent.mkdir(parents=True)
+            root = base / "hermes"
+            root.mkdir()
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs: {shared}\n"
+            )
+            output = io.StringIO()
+            with mock.patch.object(install.Path, "home", return_value=home), mock.patch.object(
+                sys,
+                "argv",
+                ["install.py", "--check", "--hermes-home", str(root), "--enable", "none"],
+            ), redirect_stdout(output):
+                self.assertEqual(install.main(), 0)
+
+            report = json.loads(output.getvalue())
+            self.assertFalse(shared.exists())
+            self.assertEqual(report["hermes"]["skills_external_in"], ["default"])
+            self.assertEqual(report["hermes"]["skills_linked_in"], [])
+
+    def test_main_installs_shared_skills_before_choosing_hermes_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            shared = home / ".agents" / "skills"
+            shared.parent.mkdir(parents=True)
+            root = base / "hermes"
+            root.mkdir()
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs:\n    - {shared}\n"
+            )
+            output = io.StringIO()
+            with mock.patch.object(install.Path, "home", return_value=home), mock.patch.object(
+                sys,
+                "argv",
+                ["install.py", "--hermes-home", str(root), "--enable", "none"],
+            ), redirect_stdout(output):
+                self.assertEqual(install.main(), 0)
+
+            report = json.loads(output.getvalue())
+            self.assertTrue((shared / "jev-computer-use" / "SKILL.md").is_file())
+            self.assertFalse(os.path.lexists(root / "skills" / "jev"))
+            self.assertEqual(report["hermes"]["skills_external_in"], ["default"])
+
     def test_full_install_links_every_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "hermes"
@@ -158,13 +226,195 @@ class InstallTests(unittest.TestCase):
                 (profile_plugin / "plugin.yaml").read_bytes(),
                 (root / "plugins" / "hermes-jev" / "plugin.yaml").read_bytes(),
             )
+            self.assertTrue((root / "skills" / "jev" / "jev-setup" / "SKILL.md").is_file())
             self.assertTrue((root / "profiles" / "alpha" / "skills" / "jev" / "jev-setup" / "SKILL.md").is_file())
+            self.assertEqual(report["skills_linked_in"], ["default", "alpha"])
             self.assertEqual(report["enabled_in"], ["alpha: enabled"])
             self.assertNotIn("hermes-jev", (root / "config.yaml").read_text())
             install.uninstall_hermes(root)
             self.assertFalse(os.path.lexists(profile_plugin))
             self.assertFalse(os.path.lexists(root / "profiles" / "alpha" / "skills" / "jev"))
             self.assertEqual((root / "profiles" / "alpha" / "config.yaml").read_text(), CONFIG)
+
+    def test_external_skills_replace_stale_default_copy_without_hiding_profile_skills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "hermes"
+            shared = base / "shared-skills"
+            install.install_skills(shared, check=False)
+            root.mkdir()
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs:\n    - {shared}\n"
+            )
+            profile = root / "profiles" / "alpha"
+            profile.mkdir(parents=True)
+            (profile / "config.yaml").write_text(CONFIG)
+            stale = root / "skills" / "jev"
+            install.install_skills(stale, check=False)
+
+            report = install.install_hermes(root, "all", check=False)
+
+            self.assertFalse(os.path.lexists(stale))
+            self.assertTrue((shared / "jev-computer-use" / "SKILL.md").is_file())
+            self.assertTrue((profile / "skills" / "jev" / "jev-computer-use" / "SKILL.md").is_file())
+            self.assertEqual(report["skills_external_in"], ["default"])
+            self.assertEqual(report["skills_linked_in"], ["alpha"])
+            self.assertEqual(report["skills_conflicts_in"], [])
+
+    def test_categorized_external_root_prevents_duplicate_local_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "hermes"
+            shared = base / "shared-skills"
+            install.install_skills(shared / "jev", check=False)
+            root.mkdir()
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs: [{shared}]\n"
+            )
+
+            report = install.install_hermes(root, "all", check=False)
+
+            self.assertEqual(report["skills_external_in"], ["default"])
+            self.assertFalse(os.path.lexists(root / "skills" / "jev"))
+
+    def test_local_projection_cannot_count_as_its_own_external_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "hermes"
+            local = root / "skills" / "jev"
+            install.install_skills(local, check=False)
+            root.mkdir(exist_ok=True)
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs: {local}\n"
+            )
+
+            report = install.install_hermes(root, "all", check=False)
+
+            self.assertEqual(report["skills_external_in"], [])
+            self.assertEqual(report["skills_linked_in"], ["default"])
+            self.assertTrue((local / "jev-computer-use" / "SKILL.md").is_file())
+
+    def test_modified_local_bundle_is_preserved_and_reported_as_a_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "hermes"
+            shared = base / "shared-skills"
+            install.install_skills(shared, check=False)
+            local = root / "skills" / "jev"
+            install.install_skills(local, check=False)
+            changed = local / "jev-computer-use" / "SKILL.md"
+            changed.write_text(changed.read_text() + "\nlocal change\n")
+            root.mkdir(exist_ok=True)
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs: {shared}\n"
+            )
+
+            report = install.install_hermes(root, "all", check=False)
+
+            self.assertEqual(report["skills_conflicts_in"], ["default"])
+            self.assertIn("local change", changed.read_text())
+            uninstall = install.uninstall_hermes(root)
+            self.assertIn(str(local), uninstall["preserved_unmanaged"])
+            self.assertIn("local change", changed.read_text())
+
+    def test_unrelated_local_link_is_preserved_during_install_and_uninstall(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "hermes"
+            shared = base / "shared-skills"
+            install.install_skills(shared, check=False)
+            unrelated = base / "user-owned-jev"
+            unrelated.mkdir()
+            sentinel = unrelated / "keep.txt"
+            sentinel.write_text("keep")
+            local = root / "skills" / "jev"
+            install._link(unrelated, local)
+            root.mkdir(exist_ok=True)
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs: {shared}\n"
+            )
+
+            report = install.install_hermes(root, "all", check=False)
+
+            self.assertEqual(report["skills_conflicts_in"], ["default"])
+            self.assertEqual(install._real_target(local), install._real_target(unrelated))
+            self.assertEqual(sentinel.read_text(), "keep")
+            uninstall = install.uninstall_hermes(root)
+            self.assertIn(str(local), uninstall["preserved_unmanaged"])
+            self.assertTrue(os.path.lexists(local))
+            self.assertEqual(sentinel.read_text(), "keep")
+
+    def test_added_empty_directory_makes_local_bundle_unmanaged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "hermes"
+            shared = base / "shared-skills"
+            install.install_skills(shared, check=False)
+            local = root / "skills" / "jev"
+            install.install_skills(local, check=False)
+            empty = local / "jev-computer-use" / "user-empty-directory"
+            empty.mkdir()
+            root.mkdir(exist_ok=True)
+            (root / "config.yaml").write_text(
+                CONFIG + f"skills:\n  external_dirs: {shared}\n"
+            )
+
+            report = install.install_hermes(root, "all", check=False)
+
+            self.assertEqual(report["skills_conflicts_in"], ["default"])
+            self.assertTrue(empty.is_dir())
+
+    def test_preserved_conflict_without_skill_is_not_a_planned_external_skill(self):
+        for check in (True, False):
+            with self.subTest(check=check), tempfile.TemporaryDirectory() as tmp:
+                base = Path(tmp)
+                home = base / "home"
+                shared = home / ".agents" / "skills"
+                conflict = shared / "jev-browser-use"
+                conflict.mkdir(parents=True)
+                sentinel = conflict / "keep.txt"
+                sentinel.write_text("user owned")
+                root = base / "hermes"
+                root.mkdir()
+                (root / "config.yaml").write_text(
+                    CONFIG + f"skills:\n  external_dirs: {shared}\n"
+                )
+                argv = ["install.py", "--hermes-home", str(root), "--enable", "none"]
+                if check:
+                    argv.append("--check")
+                output = io.StringIO()
+                with mock.patch.object(install.Path, "home", return_value=home), \
+                        mock.patch.object(sys, "argv", argv), redirect_stdout(output):
+                    self.assertEqual(install.main(), 0)
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["skill_folders"][0]["conflicts"], ["jev-browser-use"])
+                self.assertEqual(report["hermes"]["skills_external_in"], [])
+                self.assertEqual(report["hermes"]["skills_linked_in"], ["default"])
+                self.assertEqual(sentinel.read_text(), "user owned")
+                local = root / "skills" / "jev" / "jev-browser-use" / "SKILL.md"
+                self.assertEqual(local.is_file(), not check)
+
+    def test_top_level_uninstall_preserves_modified_generic_skill_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            folder = base / "generic-skills"
+            install.install_skills(folder, check=False)
+            changed = folder / "jev-computer-use" / "SKILL.md"
+            changed.write_text(changed.read_text() + "\nlocal change\n")
+            output = io.StringIO()
+            with mock.patch.object(install.Path, "home", return_value=home), mock.patch.object(
+                sys,
+                "argv",
+                ["install.py", "--uninstall", "--hermes-home", str(base / "missing"),
+                 "--skills-dir", str(folder)],
+            ), redirect_stdout(output):
+                self.assertEqual(install.main(), 0)
+
+            report = json.loads(output.getvalue())
+            self.assertTrue(changed.is_file())
+            self.assertIn(str(folder / "jev-computer-use"),
+                          report["skills_preserved_unmanaged"])
+            self.assertFalse((folder / "jev-setup").exists())
 
 
 if __name__ == "__main__":

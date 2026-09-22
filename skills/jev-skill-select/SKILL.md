@@ -31,7 +31,7 @@ jev pick-skill --turn "<the request>"            # searches Hermes, Claude Code,
 jev pick-skill --turn "..." --root ~/my/skills   # or name the folders
 ```
 
-Reply: `needs_skill` (0–1) and up to three `{name, path, match}`. Load the first one whose `match` is 0.5 or more. An empty list means proceed without a skill; do not go hunting for one.
+Reply: `needs_skill` (0–1) and up to three `{name, path, match}`. These are advisory candidates, not an instruction to load only the first threshold-passing result: apply the active skill policy and load every candidate whose procedure is applicable. An empty list means proceed without a skill; do not go hunting for one.
 
 ## Notes
 

@@ -1,6 +1,6 @@
 name: hermes-jev
-version: 0.3.5
-description: TypeSafe Jev observes skill selection in shadow mode and can provide two advisory candidates without changing models, tools, or answers.
+version: 0.5.0
+description: Jev skill advice and profile-scoped bounded routing, retrieval, compaction-selection, and action-choice tools.
 author: Steve Darlow
 license: MIT
 homepage: https://github.com/kerpopule/hermes-jev-skills
@@ -9,6 +9,21 @@ requires_env:
   - TYPESAFE_API_KEY
 provides_hooks:
   - pre_llm_call
-tags: [jev, typesafe, skills, shadow]
+  - post_tool_call
+  - pre_api_request
+  - post_api_request
+  - api_request_error
+  - on_session_end
+provides_tools:
+  - jev_memory_filter
+  - jev_compact_select
+  - jev_choose_action
+  - jev_route_model
+tags: [jev, typesafe, skills, decisions]
 config_schema:
   skills: {type: str, description: "off | shadow | on"}
+  selector: {type: str, description: "control | fast | auto; fast scores a local shortlist once"}
+  memory: {type: str, description: "off | on; explicit retrieval advice only"}
+  compaction: {type: str, description: "off | on; explicit turn selection, not automatic history rewriting"}
+  actions: {type: str, description: "off | on; action choice only, never execution"}
+  routing: {type: str, description: "off | on; routing advice and fresh CLI launches, not gateway switching"}

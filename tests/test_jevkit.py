@@ -67,6 +67,9 @@ class ClientTests(unittest.TestCase):
         sent = t.calls[0]
         self.assertEqual(sent["headers"]["Authorization"], "Bearer " + KEY)
         self.assertEqual(set(sent["request"]), {"state", "model", "questions"})
+        self.assertGreater(reply["request_bytes"], 0)
+        self.assertEqual(reply["attempts"], 1)
+        self.assertEqual(reply["usage"], {"input_tokens": 1})
 
     def test_rejects_option_that_was_not_offered(self):
         t = fake(lambda n, q, s: {"type": "choice", "choice": "rm -rf", "confidence": 1, "probabilities": {}})
@@ -87,9 +90,11 @@ class ClientTests(unittest.TestCase):
             raise client.JevError("rate_limited")
 
         started = time.monotonic()
-        with self.assertRaises(client.JevError):
+        with self.assertRaises(client.JevError) as caught:
             client.ask("s", {"q": client.noul("x")}, api_key=KEY, transport=flaky, timeout=1.0, retries=1)
         self.assertEqual(len(attempts), 2)
+        self.assertEqual(caught.exception.attempts, 2)
+        self.assertGreater(caught.exception.request_bytes, 0)
         self.assertLess(time.monotonic() - started, 1.5)
 
     def test_auth_failure_is_not_retried(self):
@@ -99,9 +104,11 @@ class ClientTests(unittest.TestCase):
             attempts.append(1)
             raise client.JevError("auth_failed")
 
-        with self.assertRaises(client.JevError):
+        with self.assertRaises(client.JevError) as caught:
             client.ask("s", {"q": client.noul("x")}, api_key=KEY, transport=denied)
         self.assertEqual(len(attempts), 1)
+        self.assertEqual(caught.exception.attempts, 1)
+        self.assertGreater(caught.exception.request_bytes, 0)
 
     def test_no_key_is_a_clean_error(self):
         with mock.patch.object(keystore, "resolve", return_value=None):
@@ -391,7 +398,7 @@ class SkillPickTests(unittest.TestCase):
             if name == "needs_skill":
                 return {"type": "noul", "noul": 0.95}
             skill_text = state["skills"].get(f"S{name[1:]}", "")
-            return {"type": "noul", "noul": 0.45 if skill_text.startswith("codex:") else 0.05}
+            return {"type": "noul", "noul": 0.55 if skill_text.startswith("codex:") else 0.05}
 
         transport = fake(misses_then_verifies)
         result = skillpick.pick("fix cmc agent codex login", skills, transport=transport)
@@ -399,6 +406,129 @@ class SkillPickTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in result["skills"]], ["codex"])
         self.assertEqual(len(transport.calls), 2)
         self.assertIn("codex:", " ".join(transport.calls[1]["request"]["state"]["skills"].values()))
+
+    def test_one_stage_picker_uses_one_request_and_reports_cost_metadata(self):
+        skills = [
+            {"name": "loc", "description": "Count lines of code", "path": "/loc"},
+            {"name": "video", "description": "Render a promo video", "path": "/video"},
+        ]
+
+        def answer(name, question, state):
+            if name == "needs_skill":
+                return {"type": "noul", "noul": 0.9}
+            skill = state["skills"][name]
+            return {"type": "noul", "noul": 0.9 if skill.startswith("loc:") else 0.05}
+
+        transport = fake(answer)
+        result = skillpick.pick_one_stage("count lines in this code", skills, transport=transport)
+
+        self.assertEqual([item["name"] for item in result["skills"]], ["loc"])
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(result["strategy"], "one-stage")
+        self.assertEqual(result["jev_calls"], 1)
+        self.assertGreater(result["request_bytes"], 0)
+        self.assertEqual(result["usage"], {"input_tokens": 1})
+
+    def test_one_stage_exact_name_still_obeys_match_threshold(self):
+        skills = [
+            {"name": "safe-review", "description": "Review code safely", "path": "/safe"},
+            {"name": "apple-notes", "description": "Use Apple Notes on macOS", "path": "/apple"},
+        ]
+
+        def answer(name, question, state):
+            if name == "needs_skill":
+                return {"type": "noul", "noul": 0.9}
+            return {"type": "noul", "noul": 0.49 if state["skills"][name].startswith("apple-notes:") else 0.8}
+
+        result = skillpick.pick_one_stage(
+            "Use apple-notes only after a safe review", skills, top_k=2, transport=fake(answer)
+        )
+
+        self.assertEqual([item["name"] for item in result["skills"]], ["safe-review"])
+
+    def test_auto_selector_falls_back_to_control_when_local_prefilter_is_empty(self):
+        skills = [{"name": "unrelated", "description": "A procedure with no shared vocabulary", "path": "/u"}]
+
+        def answer(name, question, state):
+            if question["type"] == "choice":
+                return {"type": "choice", "choice": "none", "confidence": 0.9, "probabilities": {"none": 0.99}}
+            return {"type": "noul", "noul": 0.0}
+
+        transport = fake(answer)
+        result = skillpick.pick_optimized("paraphrased request", skills, strategy="auto", transport=transport)
+
+        self.assertEqual(result["strategy"], "two-stage")
+        self.assertEqual(result["skills"], [])
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_one_stage_failure_reports_all_attempted_bytes(self):
+        skills = [{"name": "loc", "description": "Count lines of code", "path": "/loc"}]
+
+        def unavailable(body, headers, timeout):
+            raise client.JevError("rate_limited")
+
+        result = skillpick.pick_one_stage("Use loc", skills, transport=unavailable, timeout=1.0)
+
+        self.assertEqual(result["status"], "fail_open")
+        self.assertEqual(result["jev_calls"], 1)
+        self.assertEqual(result["attempts"], 2)
+        self.assertGreater(result["request_bytes"], 0)
+
+    def test_two_stage_failure_reports_parallel_attempted_bytes(self):
+        skills = [
+            {"name": f"skill-{index}", "description": "A distinct procedure", "path": f"/{index}"}
+            for index in range(skillpick.BATCH + 1)
+        ]
+
+        def unavailable(body, headers, timeout):
+            raise client.JevError("rate_limited")
+
+        result = skillpick.pick("Use a procedure", skills, transport=unavailable, timeout=1.0)
+
+        self.assertEqual(result["status"], "fail_open")
+        self.assertEqual(result["jev_calls"], 2)
+        self.assertEqual(result["attempts"], 4)
+        self.assertGreater(result["request_bytes"], 0)
+
+    def test_auto_selector_uses_fast_only_for_explicit_skill_name(self):
+        skills = [
+            {"name": "loc", "description": "Count lines of code", "path": "/loc"},
+            {"name": "video", "description": "Render a video", "path": "/video"},
+        ]
+
+        def answer(name, question, state):
+            if question["type"] == "choice":
+                return {"type": "choice", "choice": "none", "confidence": 0.9,
+                        "probabilities": {key: float(key == "none") for key in question["criteria"]}}
+            if name == "needs_skill":
+                return {"type": "noul", "noul": 0.9}
+            return {"type": "noul", "noul": 0.9 if "loc:" in " ".join(state.get("skills", {}).values()) else 0.0}
+
+        broad = fake(answer)
+        broad_result = skillpick.pick_optimized("count lines of code", skills, strategy="auto", transport=broad)
+        self.assertEqual(broad_result["strategy"], "two-stage")
+
+        exact = fake(answer)
+        exact_result = skillpick.pick_optimized("Use loc to inspect this repository", skills, strategy="auto", transport=exact)
+        self.assertEqual(exact_result["strategy"], "one-stage")
+        self.assertEqual([item["name"] for item in exact_result["skills"]], ["loc"])
+
+        negated = fake(answer)
+        negated_result = skillpick.pick_optimized("Do not use loc; define LOC", skills, strategy="auto", transport=negated)
+        self.assertEqual(negated_result["strategy"], "two-stage")
+
+        compound_skills = skills + [
+            {"name": "powerpoint", "description": "Create PowerPoint presentations", "path": "/powerpoint"},
+            {"name": "youtube-to-deck-orchestration", "description": "Turn YouTube videos into decks", "path": "/deck"},
+        ]
+        compound = fake(answer)
+        compound_result = skillpick.pick_optimized(
+            "Turn this YouTube lecture into a verified PowerPoint deck",
+            compound_skills,
+            strategy="auto",
+            transport=compound,
+        )
+        self.assertEqual(compound_result["strategy"], "two-stage")
 
 
 def action_request(**overrides):

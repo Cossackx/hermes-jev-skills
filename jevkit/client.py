@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Union
 from . import keystore
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
-DEFAULT_MODEL = "jev-latest"
+DEFAULT_MODEL = "jev-1.13.0"
 MAX_RESPONSE_BYTES = 1_000_000
 MAX_STATE_CHARS = 60_000
 USER_AGENT = "hermes-jev-skills/0.1"
@@ -31,9 +31,12 @@ Transport = Callable[[bytes, Dict[str, str], float], bytes]
 class JevError(RuntimeError):
     """Anything that means "do not trust or use this Jev result"."""
 
-    def __init__(self, code: str, detail: str = "") -> None:
+    def __init__(self, code: str, detail: str = "", *, attempts: int = 0,
+                 request_bytes: int = 0) -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code
+        self.attempts = attempts
+        self.request_bytes = request_bytes
 
 
 # ── question builders ────────────────────────────────────────────────────────
@@ -156,30 +159,49 @@ def ask(
     send = transport or _http_transport
 
     started = time.monotonic()
-    attempt = 0
+    attempts = 0
     while True:
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0.05:
-            raise JevError("timeout")
+            raise JevError("timeout", attempts=attempts, request_bytes=len(body) * attempts)
+        attempts += 1
         try:
             raw = send(body, headers, remaining)
             break
         except JevError as error:
-            attempt += 1
-            if error.code not in _RETRYABLE or attempt > retries:
+            if error.code not in _RETRYABLE or attempts > retries:
+                error.attempts = attempts
+                error.request_bytes = len(body) * attempts
                 raise
-            time.sleep(min(0.25 * attempt, max(0.0, timeout - (time.monotonic() - started) - 0.1)))
+            time.sleep(min(0.25 * attempts, max(0.0, timeout - (time.monotonic() - started) - 0.1)))
 
     try:
         payload = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        raise JevError("malformed", "reply is not JSON") from None
+        raise JevError(
+            "malformed", "reply is not JSON", attempts=attempts,
+            request_bytes=len(body) * attempts,
+        ) from None
     answers = payload.get("answers") if isinstance(payload, dict) else None
     if not isinstance(answers, dict):
-        raise JevError("malformed", "reply has no answers")
-    checked = {name: _check_answer(name, question, answers.get(name)) for name, question in questions.items()}
+        raise JevError(
+            "malformed", "reply has no answers", attempts=attempts,
+            request_bytes=len(body) * attempts,
+        )
+    try:
+        checked = {name: _check_answer(name, question, answers.get(name)) for name, question in questions.items()}
+    except JevError as error:
+        error.attempts = attempts
+        error.request_bytes = len(body) * attempts
+        raise
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-    return {"answers": checked, "usage": usage, "latency_ms": int((time.monotonic() - started) * 1000)}
+    return {
+        "answers": checked,
+        "usage": usage,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "request_bytes": len(body) * attempts,
+        "attempts": attempts,
+    }
 
 
 def verify_key(api_key: str, timeout: float = 10.0) -> bool:

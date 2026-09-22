@@ -16,7 +16,21 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+# Hosts bind credentials per invocation; no ambient fallback inside that scope.
+_RESOLVER: ContextVar[Optional[Callable[[], Optional[str]]]] = ContextVar("jev_credential_resolver", default=None)
+
+
+@contextmanager
+def credential_scope(resolver: Callable[[], Optional[str]]):
+    token = _RESOLVER.set(resolver)
+    try:
+        yield
+    finally:
+        _RESOLVER.reset(token)
 
 ENV_VAR = "TYPESAFE_API_KEY"
 KEYCHAIN_SERVICE = "Hermes TypeSafe API"
@@ -64,10 +78,18 @@ def _from_file() -> Optional[str]:
 
 
 def resolve() -> Optional[str]:
+    resolver = _RESOLVER.get()
+    if resolver is not None:
+        try:
+            return (resolver() or "").strip() or None
+        except Exception:
+            return None
     return (os.environ.get(ENV_VAR) or "").strip() or _from_keychain() or _from_file()
 
 
 def source() -> str:
+    if _RESOLVER.get() is not None:
+        return "host-profile" if resolve() else "absent"
     if (os.environ.get(ENV_VAR) or "").strip():
         return "environment"
     if _from_keychain():

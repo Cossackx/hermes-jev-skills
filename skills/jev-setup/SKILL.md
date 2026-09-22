@@ -1,7 +1,7 @@
 ---
 name: jev-setup
-description: Use when Jev is not working yet, a Jev tool reports no_key or auth_failed, or the person asks to connect, install or fix Jev. Gets the TypeSafe API key from the person into the secret store without the agent ever seeing it.
-version: 0.1.0
+description: Set up or repair Jev credentials privately in the active profile. Use when Jev reports `no_key` or `auth_failed`; never ask for, read, or handle the API key.
+version: 0.2.0
 license: MIT
 metadata:
   hermes:
@@ -10,34 +10,16 @@ metadata:
 
 # Connect Jev (the key never passes through you)
 
-Jev is TypeSafe's decision model. It needs one API key. **You must never see, ask for, or handle that key.**
+Jev needs a TypeSafe API key. Never ask the person to paste it into chat, read a secret store or `.env` file, or put a key in a command line, URL, written config, or log. If a key is pasted into chat, do not repeat/store it; advise replacement and use this flow.
 
-## Rules
+## Active-profile private setup
 
-- Never ask the person to paste the key into the chat. If they paste one anyway, do not store it, do not repeat it, tell them that key should be replaced, and start the flow below.
-- Never read the secret store, `.env` files or `~/.config/jev/credentials` to "check" the key. Use `jev doctor`, which reports only presence and length.
-- Never put the key in a command line, a URL, a config file you write, or a log.
+1. Run `jev doctor` in the active profile. It is the only check for credential presence/reachability; report its non-secret result.
+2. Read live command help: `jev setup-key --help`. Do not infer storage behavior or supported flags from this skill.
+3. Run the private setup flow only for the active Hermes home. Use the documented `--hermes-home` value for that profile when needed, and do not propagate a credential to other profiles or their environment files.
+4. The person enters the key only into the local private browser page, or runs `jev setup-key --tty` themselves in their own terminal when no local browser is available. Do not run a hidden TTY prompt through a captured agent terminal.
+5. After setup finishes, rerun `jev doctor` in the same active profile and report only whether the key is present and Jev is reachable.
 
-## Flow
+For a remote private network path, use only flags currently shown by live help, keep binding non-public, and explain any transport limitation shown by that help. Do not claim a particular OS secret store, fallback file, or cross-profile propagation unless current tool output documents it.
 
-1. Check the state: `jev doctor`. If `key.present` is true and `jev.reachable` is true, you are done.
-2. Start the private key page:
-
-   ```bash
-   jev setup-key
-   ```
-
-   It opens a page in the browser on the computer you are running on and prints one JSON line on stderr with a `url`. The URL holds no secret.
-3. Tell the person, in one sentence, to paste their TypeSafe key into the page that just opened. If `browser_opened` is false, or they are talking to you from another device (Telegram, phone), send them the `url` and tell them it only opens **on the computer the agent runs on**. If they have no key yet, they create one at https://console.typesafe.ai/settings/keys.
-4. Wait for the command to finish. It prints `{"status": "stored", "verified": true, ...}` when the key was saved and TypeSafe accepted it. `rejected` means the key was wrong: run it again. `timed_out` means nobody used the page within ten minutes.
-5. Run `jev doctor` once more and report the result in a sentence.
-
-## When there is no browser
-
-Headless server over SSH: the person runs `jev setup-key --tty` **themselves** in their own terminal. It is a hidden prompt. Do not run it for them through a tool that captures the terminal.
-
-Remote machine on a private network (Tailscale, VPN): `jev setup-key --host <private-ip> --no-open` and send them the link. That traffic is plain HTTP, so use it only on a network you trust end to end. Never bind a public address.
-
-## Where the key goes
-
-The OS secret store (macOS Keychain service `Hermes TypeSafe API`, or `secret-tool` on Linux), falling back to `~/.config/jev/credentials` (mode 0600). On a Hermes machine it is also written as `TYPESAFE_API_KEY` into `~/.hermes/.env` and every `profiles/*/.env`, because each Hermes lane reads its own file. Running gateways pick it up on their next restart; do not restart one without being asked.
+Credential isolation is active-profile-only: do not copy, borrow, discover, or default-propagate credentials between Hermes profiles. Do not restart gateways or other services unless separately requested.

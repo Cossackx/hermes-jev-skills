@@ -147,6 +147,16 @@ class Handler(BaseHTTPRequestHandler):
                 since = 0.0
             self._json(rs.jev_live(self.cfg.hermes_home, since=since))
             return
+        if path == "/api/jev/effectiveness":
+            from urllib.parse import parse_qs
+            query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                since = float((query.get("since") or ["0"])[0])
+                profile = (query.get("profile") or [None])[0]
+                self._json(rs.jev_effectiveness(self.cfg.hermes_home, since=since, profile=profile))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+            return
         if path == "/api/models":
             self._json({"models": rs.model_catalog(self.cfg.hermes_home)})
             return

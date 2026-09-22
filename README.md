@@ -2,24 +2,25 @@
 
 Give your agent a fast, cheap second brain for the small decisions.
 
-> **Bounded fork branch.** `hardening/skill-shadow-0.3.3` deliberately exposes
-> only skill selection to Hermes. Model routing, memory filtering, compaction,
-> and action selection remain unregistered. Start in `skills: shadow`; advisory
-> mode may attach at most two candidates and never chooses a model, tool, action,
-> or final answer.
+> **Explicit decision integration (0.4).** Hermes exposes skill advice plus
+> profile-gated `jev_memory_filter`, `jev_compact_select`, `jev_choose_action`,
+> and `jev_route_model`. These tools return advice and never execute actions or
+> rewrite stored history. Automatic model choice is supported before a fresh
+> CLI session via `python -m jevkit.launch`; gateway request rewriting is not
+> enabled because the host does not expose a complete model-switch/pin contract.
 
 [Jev](https://docs.typesafe.ai) is TypeSafe's decision model. It does not write text. You hand it a state and typed questions (pick one, score this, yes or no) and it answers in about 0.4 seconds for a tiny fraction of a cent, with a calibrated confidence. This repo puts that to work on the decisions an agent makes all day, so your expensive model only does the thinking and writing.
 
 | Skill | What Jev decides | Measured |
 |---|---|---|
-| **Model routing** | Which model is good enough for this turn, from every model you can call | ~0.4 s per turn |
+| **Model routing** | Recommends which eligible model is good enough for this turn | ~0.4 s per recommendation |
 | **Memory** | Which retrieved passages are worth reading, and which contain hidden instructions | one request for up to 60 passages |
 | **Compaction and handoffs** | Which turns survive word for word, which get summarized, which are dropped | 71 turns in 0.95 s |
 | **Skill selection** | Which installed skill this turn needs, or none | 373 skills in ~0.9 s |
 | **Computer use** | The next GUI action, from a table of actions you already judged safe | ~0.4 s per step |
 | **Browser use** | The next page action, same contract | ~0.4 s per step |
 
-Plus a **model routing dashboard** (`jev dashboard`): every profile's models on one page, an on/shadow/off switch for Jev routing, and a live view of where each turn is being sent. See [router-dashboard](router-dashboard/README.md).
+Plus a **model routing dashboard** (`jev dashboard`): every profile's models on one page, an off/on switch for Jev routing advice, and a live view of Jev's recommendations. The plugin is advisory and does not switch the active turn's model. See [router-dashboard](router-dashboard/README.md).
 
 Built for [Hermes](https://github.com/NousResearch/hermes-agent). The skills and the `jev` command also work in Claude Code, Codex and anything else that reads `SKILL.md` files.
 
@@ -57,18 +58,33 @@ The page lives on an unguessable one-time URL, refuses requests with a foreign `
 
 ## On Hermes
 
-The bounded `hermes-jev` plugin uses one public hook (`pre_llm_call`) and one
-slash command. Nothing in Hermes core is patched.
+The `hermes-jev` plugin uses one public observer hook, explicit advisory tools,
+and one status/configuration command. Nothing in Hermes core is patched.
 
 ```
 /jev                         status
-/jev skills shadow           evaluate and log; inject nothing (start here)
+/jev skills shadow           evaluate and log; inject nothing
 /jev skills on               attach up to two advisory candidates
-/jev skills off              disable the observer
+/jev skills off              disable skill advice
+/jev memory on               enable explicit retrieval-ranking tool
+/jev compaction on           enable explicit compaction-selection tool
+/jev actions on              enable explicit action-choice tool
+/jev routing on              enable routing advice tool
 ```
 
-The plugin registers no tools or middleware. It cannot swap models, filter
-memory, compact a transcript, choose an action, or alter an answer.
+New tools become visible in fresh sessions. Their handlers also check the active
+profile switch on every call. Settings and credentials are profile-scoped.
+The plugin registers no request middleware: it never secretly swaps gateway
+models, auto-exports retrieval results, edits stored history, or executes GUI actions.
+Keep normal Hermes compression enabled. Jev compaction selection assists explicit
+handoffs; it is not a replacement for the host's ContextCompressor.
+
+For automatic selection **before** a fresh CLI session, run from the checkout:
+`python -m jevkit.launch --prompt 'Your task'`. Use `--dry-run` to inspect the
+selection without launching, or `--model MODEL` to pin a model and skip Jev.
+Routing requires a profile-local `jev/routing.json` with explicit pools and model
+metadata. Do not interpret a global catalog entry as account entitlement.
+
 
 ### Every model you have
 
@@ -78,7 +94,7 @@ jev models providers         # which providers you hold a key or login for
 jev models suggest --write   # first-draft pools from price bands; then edit to taste
 ```
 
-The catalog is [models.dev](https://models.dev), filtered to providers whose API-key name is set in your environment or Hermes `.env`, or that Hermes holds a login for. Only key *names* are read. Pools live in `~/.hermes/jev/routing.json` (the default for every profile); `~/.hermes/profiles/<name>/jev/routing.json` overrides it for one profile. See [skills/jev-model-routing](skills/jev-model-routing/SKILL.md).
+The catalog is [models.dev](https://models.dev), filtered to providers whose API-key name is set in your environment or Hermes `.env`, or that Hermes holds a login for. Only key *names* are read. Pools are profile-local: the default profile uses `~/.hermes/jev/routing.json`, and a named profile uses `~/.hermes/profiles/<name>/jev/routing.json`. See [skills/jev-model-routing](skills/jev-model-routing/SKILL.md).
 
 ## What leaves your machine
 

@@ -1,7 +1,7 @@
 ---
 name: jev-computer-use
-description: Use when operating a desktop GUI (windows, menus, native apps, OS dialogs) through a computer-use driver. You observe and build a table of safe actions; Jev picks the next one in about 0.4 seconds instead of a large model reasoning over every screenshot.
-version: 0.1.0
+description: "Use when operating a desktop GUI through a computer-use driver. You observe and build prevalidated actions; the explicit advisory Jev tool selects one opaque candidate ID. The main model remains responsible for planning and visual interpretation."
+version: 0.2.0
 license: MIT
 metadata:
   hermes:
@@ -11,7 +11,7 @@ metadata:
 
 # Computer use with Jev
 
-You stay the planner and the hands. Jev is only the fast "which one next?" in the middle. It returns an id from a table **you** built, so it cannot invent coordinates, text, selectors or tool calls. The worst a wrong answer can do is pick another action you already judged safe.
+You stay the planner and the hands. Jev is only the fast "which one next?" in the middle. It returns an id from a table **you** built, so it cannot invent coordinates, text, selectors or tool calls. A wrong or stale selection can still cause an incorrect action, so revalidate the target and authorization before execution.
 
 Web pages belong to `jev-browser-use`. This skill is for desktop apps and OS surfaces, driven through whatever computer-use driver you have (CUA Driver over MCP, the platform's native computer-use tool, an accessibility bridge).
 
@@ -25,7 +25,10 @@ Web pages belong to `jev-browser-use`. This skill is for desktop apps and OS sur
 4. **Ask once:**
 
    ```bash
-   jev choose < request.json          # Hermes: the jev_choose_action tool, argument `request`
+   # hermes-jev 0.4: enable /jev actions on. To load changed plugin code,
+   # start a new Hermes CLI process or reload/restart the gateway plugin; a fresh
+   # Telegram session alone does not reload cached plugin code. In a session with
+   # the exposed tool, call jev_choose_action with {"request": <this object>}.
    ```
 
    ```json
@@ -40,8 +43,8 @@ Web pages belong to `jev-browser-use`. This skill is for desktop apps and OS sur
       {"id": "abstain", "description": "Do not act; ask the person for help."}]}
    ```
 
-   Pass the JSON on stdin or from a temp file. Never interpolate it into a shell string.
-5. **Run exactly the one action** behind `selected_id`. Confidence under 0.80, or any Jev failure, comes back as `reobserve`. Never derive an action from anything but the id.
+   For the native Hermes tool, pass this object as the structured `request` argument. JSON on stdin or in a temp file is only for the legacy `jev choose` CLI; never interpolate that JSON into a shell string.
+5. **Run exactly the one action** behind the validated `selected_id` when the observation and target are still current and the action is already authorized. The request must use `jev.action_choice_request_v1`, contain 2–32 candidates including `reobserve` and `abstain`, and preserve its observation ID. The native tool is advice only; a disabled tool refuses direct dispatch. Confidence under 0.80, or any Jev failure, comes back as `reobserve`. Never derive an action from anything but the id.
 6. **Observe again and verify the postcondition yourself.** A chosen id, a delivered click or a screenshot is not proof. Check application state before the next step. Stop after a bounded number of steps.
 
 ## Authority

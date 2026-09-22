@@ -7,6 +7,7 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -74,6 +75,8 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertIn("Hermes Model Routing", html)
         self.assertIn("Apply changes", html)
+        self.assertIn("using its local default", html)
+        self.assertNotIn("following the all-profiles default", html)
 
     def test_state_lists_profiles_and_use_cases(self):
         code, body = self.call("/api/state")
@@ -82,13 +85,19 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(body["use_cases"][0]["key"], "__main__")
         self.assertIn("intent", body["jev_mode"])
 
+    def test_jev_effectiveness_endpoint_is_read_only_rollup(self):
+        code, body = self.call("/api/jev/effectiveness")
+        self.assertEqual(code, 200)
+        self.assertIn("overall", body)
+        self.assertIn("profiles", body)
+
     def test_plan_previews_without_writing(self):
-        before = open(os.path.join(self.home, "config.yaml"), encoding="utf-8").read()
+        before = Path(self.home, "config.yaml").read_text(encoding="utf-8")
         code, body = self.call("/api/plan", {"profile": "default",
                                              "changes": {"compression": {"model": "google/gemini-2.5-flash"}}})
         self.assertEqual(code, 200)
         self.assertEqual(body["rows"][0]["after"], "google/gemini-2.5-flash")
-        self.assertEqual(open(os.path.join(self.home, "config.yaml"), encoding="utf-8").read(), before)
+        self.assertEqual(Path(self.home, "config.yaml").read_text(encoding="utf-8"), before)
 
     def test_apply_requires_confirm(self):
         code, body = self.call("/api/apply", {"profile": "default",
